@@ -21,9 +21,11 @@ A lightweight, single-instance overlay notepad for Linux desktops. Press a globa
 | `Alt+P` | Close current tab |
 | `Alt+S` | Archive current tab to `~/.local/share/quicknotes/archive/` |
 | `Alt+F` | Open search bar (substring search across all tabs) |
-| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Cycle tabs |
+| `Alt+.` / `Alt+,` | Next / previous tab |
 | `Esc` | Close search bar if open, otherwise hide overlay |
 | Double-click tab | Rename |
+
+All `Alt+…` shortcuts above are user-rebindable — click the `[?]` button in the top-right of the overlay, then click any key cell in the popup to capture a new combination. Bindings persist in `~/.local/share/quicknotes/shortcuts.json`. Use **[reset defaults]** at the bottom of the popup to revert.
 
 ### Archive
 

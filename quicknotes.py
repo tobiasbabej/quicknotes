@@ -43,6 +43,41 @@ HIT_FG      = "#ffffff"
 EDITOR_FONT = ("Monospace", 11)
 UI_FONT     = ("Monospace", 9)
 
+SHORTCUTS_FILE = NOTES_DIR / "shortcuts.json"
+
+# Rebindable actions. Order here is preserved in the help popup.
+DEFAULT_SHORTCUTS = {
+    "new_tab":     "<Alt-n>",
+    "close_tab":   "<Alt-p>",
+    "archive_tab": "<Alt-s>",
+    "search":      "<Alt-f>",
+    "next_tab":    "<Alt-period>",
+    "prev_tab":    "<Alt-comma>",
+}
+ACTION_LABELS = {
+    "new_tab":     "new tab",
+    "close_tab":   "close current tab",
+    "archive_tab": "archive current tab",
+    "search":      "search across tabs",
+    "next_tab":    "next tab",
+    "prev_tab":    "previous tab",
+}
+
+# Pure modifier keysyms — ignored during capture so user has to press a real key.
+MODIFIER_KEYSYMS = {
+    "Alt_L", "Alt_R", "Control_L", "Control_R",
+    "Shift_L", "Shift_R", "Super_L", "Super_R",
+    "ISO_Level3_Shift", "Meta_L", "Meta_R", "Caps_Lock", "Num_Lock",
+}
+# Pretty-print map for non-letter keysyms.
+KEYSYM_PRETTY = {
+    "period": ".", "comma": ",", "slash": "/", "backslash": "\\",
+    "semicolon": ";", "apostrophe": "'", "bracketleft": "[",
+    "bracketright": "]", "minus": "-", "equal": "=",
+    "Return": "Enter", "space": "Space", "Tab": "Tab",
+    "Escape": "Esc", "BackSpace": "Backspace",
+}
+
 
 def safe_filename(name: str) -> str:
     s = re.sub(r"[^\w\s-]", "", name).strip().replace(" ", "_")
@@ -126,14 +161,27 @@ class NotesApp:
             self.new_tab(name="Note 1")
 
         self._build_resize_grip()
+        self._help_win = None
+        self._build_help_button()
+
+        self.action_handlers = {
+            "new_tab":     self.new_tab,
+            "close_tab":   self.close_current_tab,
+            "archive_tab": self.archive_current_tab,
+            "search":      self._open_search,
+            "next_tab":    lambda: self._cycle_tab(1),
+            "prev_tab":    lambda: self._cycle_tab(-1),
+        }
+        self.shortcuts = dict(DEFAULT_SHORTCUTS)
+        self._bound_keys = set()
+        self._capturing = None
+        self._capturing_label = None
+        self._load_shortcuts()
+        self._apply_shortcuts()
+        # One global listener used only when capturing a new binding.
+        self.root.bind_all("<KeyPress>", self._on_any_key, "+")
 
         self.root.bind_all("<Escape>", self._on_escape)
-        self.root.bind_all("<Alt-n>", lambda e: (self.new_tab(), "break")[1])
-        self.root.bind_all("<Alt-p>", lambda e: (self.close_current_tab(), "break")[1])
-        self.root.bind_all("<Alt-s>", lambda e: (self.archive_current_tab(), "break")[1])
-        self.root.bind_all("<Alt-f>", lambda e: (self._open_search(), "break")[1])
-        self.root.bind_all("<Control-Tab>", lambda e: self._cycle_tab(1))
-        self.root.bind_all("<Control-Shift-ISO_Left_Tab>", lambda e: self._cycle_tab(-1))
         self.nb.bind("<Double-Button-1>", self.on_tab_double_click)
         self.root.protocol("WM_DELETE_WINDOW", self.hide)
 
@@ -475,6 +523,207 @@ class NotesApp:
         new_h = max(min_h, h0 + (event.y_root - y0))
         self.root.geometry(f"{new_w}x{new_h}")
 
+    # ---------- Customizable shortcuts ----------
+    def _load_shortcuts(self):
+        if not SHORTCUTS_FILE.exists():
+            return
+        try:
+            data = json.loads(SHORTCUTS_FILE.read_text())
+        except (json.JSONDecodeError, OSError):
+            return
+        for action, binding in data.items():
+            if (action in self.shortcuts
+                    and isinstance(binding, str)
+                    and binding.startswith("<")
+                    and binding.endswith(">")):
+                self.shortcuts[action] = binding
+
+    def _save_shortcuts(self):
+        try:
+            SHORTCUTS_FILE.write_text(json.dumps(self.shortcuts, indent=2))
+        except OSError:
+            pass
+
+    def _apply_shortcuts(self):
+        for old in self._bound_keys:
+            try:
+                self.root.unbind_all(old)
+            except tk.TclError:
+                pass
+        self._bound_keys = set()
+        for action, key in self.shortcuts.items():
+            handler = self.action_handlers[action]
+            self.root.bind_all(
+                key, lambda e, h=handler: (h(), "break")[1])
+            self._bound_keys.add(key)
+
+    def _pretty_binding(self, binding):
+        if not (binding.startswith("<") and binding.endswith(">")):
+            return binding
+        parts = binding[1:-1].split("-")
+        out = [p.replace("Control", "Ctrl") for p in parts[:-1]]
+        key = parts[-1]
+        out.append(KEYSYM_PRETTY.get(key, key.upper() if len(key) == 1 else key))
+        return "+".join(out)
+
+    def _compose_binding(self, event):
+        mods = []
+        if event.state & 0x4:    mods.append("Control")
+        if event.state & 0x8:    mods.append("Alt")
+        if event.state & 0x40:   mods.append("Super")
+        if event.state & 0x1:    mods.append("Shift")
+        return "<" + "-".join(mods + [event.keysym]) + ">"
+
+    def _on_any_key(self, event):
+        if self._capturing is None:
+            return  # pass-through; specific bindings still fire
+        if event.keysym in MODIFIER_KEYSYMS:
+            return "break"
+        if event.keysym == "Escape":
+            self._cancel_capture()
+            return "break"
+        self._finish_capture(self._compose_binding(event))
+        return "break"
+
+    def _start_capture(self, action, label_widget):
+        if self._capturing is not None:
+            return
+        self._capturing = action
+        self._capturing_label = label_widget
+        label_widget.configure(text="[press key…]", fg=FG_BRIGHT)
+        # Move focus off the editor so the captured key doesn't get typed in.
+        try:
+            self.help_btn.focus_set()
+        except tk.TclError:
+            pass
+
+    def _cancel_capture(self):
+        if self._capturing is None:
+            return
+        old = self.shortcuts[self._capturing]
+        if self._capturing_label is not None:
+            try:
+                self._capturing_label.configure(
+                    text=f"[{self._pretty_binding(old)}]", fg=FG)
+            except tk.TclError:
+                pass
+        self._capturing = None
+        self._capturing_label = None
+
+    def _finish_capture(self, binding):
+        action = self._capturing
+        label = self._capturing_label
+        self.shortcuts[action] = binding
+        self._save_shortcuts()
+        self._apply_shortcuts()
+        if label is not None:
+            try:
+                label.configure(text=f"[{self._pretty_binding(binding)}]", fg=FG)
+            except tk.TclError:
+                pass
+        self._capturing = None
+        self._capturing_label = None
+
+    def _reset_shortcuts(self):
+        self._capturing = None
+        self._capturing_label = None
+        self.shortcuts = dict(DEFAULT_SHORTCUTS)
+        self._save_shortcuts()
+        self._apply_shortcuts()
+        if self._help_win is not None and self._help_win.winfo_exists():
+            self._close_help()
+            self._open_help()
+
+    # ---------- Help / shortcut legend ----------
+    def _build_help_button(self):
+        self.help_btn = tk.Button(
+            self.root, text="[?]",
+            bg=BG_ALT, fg=FG_DIM,
+            activebackground=BG_HOVER, activeforeground=FG_BRIGHT,
+            relief="flat", borderwidth=0, font=UI_FONT,
+            padx=4, pady=0, cursor="hand2",
+            command=self._toggle_help,
+        )
+        self.help_btn.place(relx=1.0, x=-6, y=10, anchor="ne")
+        self.help_btn.lift()
+
+    def _toggle_help(self):
+        if self._help_win is not None and self._help_win.winfo_exists():
+            self._close_help()
+        else:
+            self._open_help()
+
+    def _open_help(self):
+        win = tk.Toplevel(self.root)
+        self._help_win = win
+        win.configure(bg=BG)
+        win.attributes("-topmost", True)
+        try:
+            win.attributes("-type", "splash")
+        except tk.TclError:
+            pass
+
+        border = tk.Frame(win, bg=BG_HOVER)
+        border.pack()
+        frame = tk.Frame(border, bg=BG, padx=12, pady=10)
+        frame.pack(padx=1, pady=1)
+
+        tk.Label(frame, text="── SHORTCUTS ──", bg=BG, fg=FG_BRIGHT,
+                 font=UI_FONT).pack(anchor="w")
+        tk.Label(frame, text="click a key to rebind", bg=BG, fg=FG_FAINT,
+                 font=UI_FONT).pack(anchor="w", pady=(0, 6))
+
+        for action in DEFAULT_SHORTCUTS:
+            row = tk.Frame(frame, bg=BG)
+            row.pack(fill="x", pady=1)
+            tk.Label(row, text=ACTION_LABELS[action], bg=BG, fg=FG_DIM,
+                     font=UI_FONT, width=20, anchor="w").pack(side="left")
+            key_lbl = tk.Label(
+                row,
+                text=f"[{self._pretty_binding(self.shortcuts[action])}]",
+                bg=BG, fg=FG, font=UI_FONT, cursor="hand2")
+            key_lbl.pack(side="left")
+            key_lbl.bind(
+                "<Button-1>",
+                lambda e, a=action, l=key_lbl: self._start_capture(a, l))
+
+        tk.Frame(frame, bg=BG_HOVER, height=1).pack(fill="x", pady=(8, 4))
+        for key, desc in (("Esc", "close popup / hide overlay"),
+                          ("dbl-click", "rename tab")):
+            row = tk.Frame(frame, bg=BG)
+            row.pack(fill="x", pady=1)
+            tk.Label(row, text=desc, bg=BG, fg=FG_DIM, font=UI_FONT,
+                     width=20, anchor="w").pack(side="left")
+            tk.Label(row, text=key, bg=BG, fg=FG_FAINT,
+                     font=UI_FONT).pack(side="left")
+
+        tk.Frame(frame, bg=BG_HOVER, height=1).pack(fill="x", pady=(8, 4))
+        reset = tk.Label(frame, text="[reset defaults]", bg=BG, fg=FG_FAINT,
+                         font=UI_FONT, cursor="hand2")
+        reset.pack(anchor="w")
+        reset.bind("<Button-1>", lambda e: self._reset_shortcuts())
+        reset.bind("<Enter>", lambda e: reset.configure(fg=FG_BRIGHT))
+        reset.bind("<Leave>", lambda e: reset.configure(fg=FG_FAINT))
+
+        # Anchor popup below the [?] button, right-aligned with it
+        win.update_idletasks()
+        pw = win.winfo_reqwidth()
+        px = self.help_btn.winfo_rootx() + self.help_btn.winfo_width() - pw
+        py = self.help_btn.winfo_rooty() + self.help_btn.winfo_height() + 2
+        win.geometry(f"+{px}+{py}")
+
+        win.bind("<Escape>", lambda e: self._close_help())
+
+    def _close_help(self):
+        self._capturing = None
+        self._capturing_label = None
+        if self._help_win is not None:
+            try:
+                self._help_win.destroy()
+            except tk.TclError:
+                pass
+        self._help_win = None
+
     # ---------- Search ----------
     def _build_search_bar(self):
         self.search_frame = ttk.Frame(self.root)
@@ -616,6 +865,9 @@ class NotesApp:
         text.see(start)
 
     def _on_escape(self, event=None):
+        if self._help_win is not None and self._help_win.winfo_exists():
+            self._close_help()
+            return "break"
         if self.search_visible:
             self._close_search()
             return "break"
@@ -642,6 +894,7 @@ class NotesApp:
             self._saved_geometry = self.root.geometry()
         except tk.TclError:
             pass
+        self._close_help()
         self.save_all()
         self.save_meta()
         self.root.withdraw()

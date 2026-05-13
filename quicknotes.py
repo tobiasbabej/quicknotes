@@ -178,7 +178,9 @@ class NotesApp:
         self._capturing_label = None
         self._load_shortcuts()
         self._apply_shortcuts()
-        # One global listener used only when capturing a new binding.
+        # Generic listener for capture. <Alt-KeyPress> is bound only while
+        # capturing (see _start_capture) — keeping it permanent shadowed
+        # the configured Alt-letter shortcuts in this Tk build.
         self.root.bind_all("<KeyPress>", self._on_any_key, "+")
 
         self.root.bind_all("<Escape>", self._on_escape)
@@ -572,7 +574,12 @@ class NotesApp:
         if event.state & 0x8:    mods.append("Alt")
         if event.state & 0x40:   mods.append("Super")
         if event.state & 0x1:    mods.append("Shift")
-        return "<" + "-".join(mods + [event.keysym]) + ">"
+        key = event.keysym
+        # Tk reads "<Alt-K>" as Alt+Shift+K. If Shift wasn't actually held
+        # (e.g. Caps Lock is on), lowercase the letter so later presses match.
+        if len(key) == 1 and key.isalpha() and "Shift" not in mods:
+            key = key.lower()
+        return "<" + "-".join(mods + [key]) + ">"
 
     def _on_any_key(self, event):
         if self._capturing is None:
@@ -591,9 +598,29 @@ class NotesApp:
         self._capturing = action
         self._capturing_label = label_widget
         label_widget.configure(text="[press key…]", fg=FG_BRIGHT)
+        # Drop existing shortcut bindings so they don't fire instead of being
+        # captured (otherwise pressing e.g. Alt+P would close the tab here).
+        # They get restored on _finish_capture / _cancel_capture / _close_help.
+        for key in list(self._bound_keys):
+            try:
+                self.root.unbind_all(key)
+            except tk.TclError:
+                pass
+        self._bound_keys = set()
+        # Tk's built-in <Alt-KeyPress> binding on the "all" tag swallows
+        # Alt+letter events before <KeyPress> sees them. Install our own
+        # for the duration of the capture; tear it down in _release_capture
+        # so it doesn't shadow the rebound Alt-letter shortcuts.
+        self.root.bind_all("<Alt-KeyPress>", self._on_any_key, "+")
         # Move focus off the editor so the captured key doesn't get typed in.
         try:
             self.help_btn.focus_set()
+        except tk.TclError:
+            pass
+
+    def _release_capture(self):
+        try:
+            self.root.unbind_all("<Alt-KeyPress>")
         except tk.TclError:
             pass
 
@@ -609,10 +636,15 @@ class NotesApp:
                 pass
         self._capturing = None
         self._capturing_label = None
+        self._release_capture()
+        self._apply_shortcuts()  # restore bindings suspended in _start_capture
 
     def _finish_capture(self, binding):
         action = self._capturing
         label = self._capturing_label
+        self._capturing = None
+        self._capturing_label = None
+        self._release_capture()
         self.shortcuts[action] = binding
         self._save_shortcuts()
         self._apply_shortcuts()
@@ -621,8 +653,6 @@ class NotesApp:
                 label.configure(text=f"[{self._pretty_binding(binding)}]", fg=FG)
             except tk.TclError:
                 pass
-        self._capturing = None
-        self._capturing_label = None
 
     def _reset_shortcuts(self):
         self._capturing = None
@@ -715,8 +745,12 @@ class NotesApp:
         win.bind("<Escape>", lambda e: self._close_help())
 
     def _close_help(self):
+        was_capturing = self._capturing is not None
         self._capturing = None
         self._capturing_label = None
+        if was_capturing:
+            self._release_capture()
+            self._apply_shortcuts()  # restore bindings suspended in _start_capture
         if self._help_win is not None:
             try:
                 self._help_win.destroy()

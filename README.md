@@ -6,11 +6,12 @@ A lightweight, single-instance overlay notepad for Linux desktops. Press a globa
 
 - **Multi-tab** notes — each tab is its own `.txt` file on disk
 - **Auto-save** ~400 ms after you stop typing
-- **Per-tab close button** (×) plus an `Alt+D` shortcut
+- **Per-tab close button** (×) plus an `Alt+P` shortcut
+- **Archive** the current tab to a side folder with `Alt+S` — pair with `Alt+P` to clear it from the overlay while keeping a timestamped copy on disk
 - **Double-click a tab** to rename it (the underlying file is renamed too)
 - **Esc** hides the overlay; relaunch shows it again at the same screen position
 - **Single-instance daemon** with a Unix socket — invoking the command a second time toggles the existing window instead of opening a new one
-- **Dark theme**, monospaced editor, top-most window
+- **Dark-green CRT-ish theme**, monospaced editor, top-most window
 
 ## Keyboard shortcuts
 
@@ -18,10 +19,15 @@ A lightweight, single-instance overlay notepad for Linux desktops. Press a globa
 |---|---|
 | `Alt+N` | New tab |
 | `Alt+P` | Close current tab |
+| `Alt+S` | Archive current tab to `~/.local/share/quicknotes/archive/` |
 | `Alt+F` | Open search bar (substring search across all tabs) |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Cycle tabs |
 | `Esc` | Close search bar if open, otherwise hide overlay |
 | Double-click tab | Rename |
+
+### Archive
+
+`Alt+S` (or the side-panel **↳ archive** button) flushes the current tab and copies its contents to `~/.local/share/quicknotes/archive/<tab-name>_<YYYYMMDD-HHMMSS>.txt`. The tab stays open; each press creates a new timestamped snapshot. Typical workflow: `Alt+S` to stash a note you want to keep, then `Alt+P` to drop the tab from the overlay.
 
 ### Search
 
@@ -62,7 +68,9 @@ Notes are stored under `~/.local/share/quicknotes/`:
 ├── tabs.json        # tab order + saved window geometry
 ├── Note_1.txt
 ├── Note_2.txt
-└── ...
+├── ...
+└── archive/         # snapshots written by Alt+S; not loaded back into the overlay
+    └── Note_1_20260513-142210.txt
 ```
 
 ## Binding a global shortcut

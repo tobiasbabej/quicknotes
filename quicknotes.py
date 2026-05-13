@@ -15,13 +15,33 @@ import socket
 import sys
 import threading
 import tkinter as tk
+from datetime import datetime
 from pathlib import Path
 from tkinter import simpledialog, ttk
 
 NOTES_DIR = Path.home() / ".local/share/quicknotes"
+ARCHIVE_DIR = NOTES_DIR / "archive"
 META_FILE = NOTES_DIR / "tabs.json"
 SOCKET_PATH = f"/tmp/quicknotes-{os.getuid()}.sock"
 AUTOSAVE_MS = 400
+
+# Dark-green CRT-ish palette. All UI colors flow from here.
+BG          = "#0a1f14"  # window / frames
+BG_ALT      = "#13301f"  # buttons, idle tabs
+BG_HOVER    = "#1f4a30"  # active button, selected tab
+EDITOR_BG   = "#0d2419"  # text widget interior
+FG          = "#9be09b"  # primary text
+FG_DIM      = "#6aa66a"  # idle tab label, helper labels
+FG_FAINT    = "#4a7a4a"  # status footer
+FG_BRIGHT   = "#d6ffd6"  # selected tab text / cursor
+SEL_BG      = "#1f5a3a"  # text selection background
+CLOSE_X     = "#6aa66a"  # tab × idle
+CLOSE_X_HOT = "#ff7070"  # tab × hover (red kept for "destructive" affordance)
+HIT_BG      = "#2a5a1a"  # search-match highlight bg
+HIT_FG      = "#ffffff"
+
+EDITOR_FONT = ("Monospace", 11)
+UI_FONT     = ("Monospace", 9)
 
 
 def safe_filename(name: str) -> str:
@@ -55,21 +75,24 @@ class NotesApp:
         self.root.geometry("760x540")
         self.root.minsize(420, 240)
         self.root.attributes("-topmost", True)
-        self.root.configure(bg="#1e1e1e")
+        self.root.overrideredirect(True)  # hide WM title bar
+        self.root.configure(bg=BG)
 
         style = ttk.Style()
         try:
             style.theme_use("clam")
         except tk.TclError:
             pass
-        style.configure("TFrame", background="#1e1e1e")
-        style.configure("TButton", padding=5, background="#2d2d2d",
-                        foreground="#e6e6e6", borderwidth=0)
-        style.map("TButton", background=[("active", "#3a3a3a")])
-        style.configure("TSeparator", background="#3a3a3a")
+        style.configure("TFrame", background=BG)
+        style.configure("TButton", padding=4, background=BG_ALT,
+                        foreground=FG, borderwidth=0, font=UI_FONT)
+        style.map("TButton", background=[("active", BG_HOVER)],
+                  foreground=[("active", FG_BRIGHT)])
+        style.configure("TSeparator", background=BG_HOVER)
 
         self._setup_closeable_notebook(style)
 
+        self._build_drag_bar()
         self.container = ttk.Frame(self.root)
         self.container.pack(fill="both", expand=True)
         self._build_search_bar()
@@ -86,9 +109,10 @@ class NotesApp:
         ttk.Button(side, text="rename", width=10, command=self.rename_current_tab).pack(pady=2)
         ttk.Button(side, text="× close", width=10, command=self.close_current_tab).pack(pady=2)
         ttk.Separator(side, orient="horizontal").pack(fill="x", pady=8)
+        ttk.Button(side, text="↳ archive", width=10, command=self.archive_current_tab).pack(pady=2)
         ttk.Button(side, text="hide (Esc)", width=10, command=self.hide).pack(pady=2)
-        self.status = ttk.Label(side, text="", background="#1e1e1e",
-                                foreground="#6a6a6a", font=("Sans", 8))
+        self.status = ttk.Label(side, text="", background=BG,
+                                foreground=FG_FAINT, font=UI_FONT)
         self.status.pack(side="bottom", pady=4)
 
         self.tabs = []
@@ -96,9 +120,12 @@ class NotesApp:
         if not self.tabs:
             self.new_tab(name="Note 1")
 
+        self._build_resize_grip()
+
         self.root.bind_all("<Escape>", self._on_escape)
         self.root.bind_all("<Alt-n>", lambda e: (self.new_tab(), "break")[1])
         self.root.bind_all("<Alt-p>", lambda e: (self.close_current_tab(), "break")[1])
+        self.root.bind_all("<Alt-s>", lambda e: (self.archive_current_tab(), "break")[1])
         self.root.bind_all("<Alt-f>", lambda e: (self._open_search(), "break")[1])
         self.root.bind_all("<Control-Tab>", lambda e: self._cycle_tab(1))
         self.root.bind_all("<Control-Shift-ISO_Left_Tab>", lambda e: self._cycle_tab(-1))
@@ -121,8 +148,8 @@ class NotesApp:
                 img.put(color, (10 - i, i))
             return img
 
-        self._img_close = make_x("#9a9a9a")
-        self._img_close_hover = make_x("#ff6b6b")
+        self._img_close = make_x(CLOSE_X)
+        self._img_close_hover = make_x(CLOSE_X_HOT)
 
         # Re-creating an element with the same name throws — guard it.
         try:
@@ -148,12 +175,12 @@ class NotesApp:
                 ]}),
             ]}),
         ])
-        style.configure("Closeable.TNotebook", background="#1e1e1e", borderwidth=0)
-        style.configure("Closeable.TNotebook.Tab", padding=[12, 6],
-                        background="#2d2d2d", foreground="#bdbdbd")
+        style.configure("Closeable.TNotebook", background=BG, borderwidth=0)
+        style.configure("Closeable.TNotebook.Tab", padding=[10, 4],
+                        background=BG_ALT, foreground=FG_DIM, font=UI_FONT)
         style.map("Closeable.TNotebook.Tab",
-                  background=[("selected", "#3a3a3a")],
-                  foreground=[("selected", "#ffffff")])
+                  background=[("selected", BG_HOVER)],
+                  foreground=[("selected", FG_BRIGHT)])
 
     def _on_tab_press(self, event):
         elem = self.nb.identify(event.x, event.y)
@@ -245,10 +272,10 @@ class NotesApp:
     # ---------- Tabs ----------
     def _add_tab(self, name, content="", fname=None):
         frame = ttk.Frame(self.nb)
-        text = tk.Text(frame, wrap="word", bg="#252526", fg="#e6e6e6",
-                       insertbackground="#e6e6e6", relief="flat",
-                       font=("Monospace", 11), undo=True, padx=10, pady=10,
-                       selectbackground="#264f78")
+        text = tk.Text(frame, wrap="word", bg=EDITOR_BG, fg=FG,
+                       insertbackground=FG_BRIGHT, relief="flat",
+                       font=EDITOR_FONT, undo=True, padx=10, pady=10,
+                       selectbackground=SEL_BG)
         scroll = ttk.Scrollbar(frame, command=text.yview)
         text.configure(yscrollcommand=scroll.set)
         scroll.pack(side="right", fill="y")
@@ -380,6 +407,21 @@ class NotesApp:
         for tab in self.tabs:
             self._save_tab(tab)
 
+    def archive_current_tab(self):
+        idx = self._current_index()
+        if idx is None:
+            return
+        tab = self.tabs[idx]
+        self._save_tab(tab)
+        try:
+            ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+            target = ARCHIVE_DIR / f"{safe_filename(tab['name'])}_{ts}.txt"
+            target.write_text(tab["text"].get("1.0", "end-1c"))
+            self._flash_status(f"archived → {target.name}")
+        except OSError as e:
+            self._flash_status(f"archive failed: {e}")
+
     def _flash_status(self, msg):
         self.status.configure(text=msg)
         self.root.after(1500, lambda: self.status.configure(text=""))
@@ -388,6 +430,45 @@ class NotesApp:
         idx = self._current_index()
         if idx is not None and 0 <= idx < len(self.tabs):
             self.tabs[idx]["text"].focus_set()
+
+    # ---------- Drag bar + resize grip (replace WM chrome) ----------
+    def _build_drag_bar(self):
+        self.drag_bar = tk.Frame(self.root, bg=BG_HOVER, height=6, cursor="fleur")
+        self.drag_bar.pack(side="top", fill="x")
+        self.drag_bar.bind("<ButtonPress-1>", self._on_drag_start)
+        self.drag_bar.bind("<B1-Motion>", self._on_drag_motion)
+        self.drag_bar.bind("<Enter>", lambda e: self.drag_bar.configure(bg=FG_DIM))
+        self.drag_bar.bind("<Leave>", lambda e: self.drag_bar.configure(bg=BG_HOVER))
+
+    def _on_drag_start(self, event):
+        self._drag_dx = event.x_root - self.root.winfo_x()
+        self._drag_dy = event.y_root - self.root.winfo_y()
+
+    def _on_drag_motion(self, event):
+        x = event.x_root - self._drag_dx
+        y = event.y_root - self._drag_dy
+        self.root.geometry(f"+{x}+{y}")
+
+    def _build_resize_grip(self):
+        self.resize_grip = tk.Frame(self.root, bg=FG_DIM, width=12, height=12,
+                                    cursor="bottom_right_corner")
+        self.resize_grip.place(relx=1.0, rely=1.0, anchor="se")
+        self.resize_grip.bind("<ButtonPress-1>", self._on_resize_start)
+        self.resize_grip.bind("<B1-Motion>", self._on_resize_motion)
+        self.resize_grip.bind("<Enter>", lambda e: self.resize_grip.configure(bg=FG_BRIGHT))
+        self.resize_grip.bind("<Leave>", lambda e: self.resize_grip.configure(bg=FG_DIM))
+        self.resize_grip.lift()
+
+    def _on_resize_start(self, event):
+        self._resize_anchor = (event.x_root, event.y_root,
+                               self.root.winfo_width(), self.root.winfo_height())
+
+    def _on_resize_motion(self, event):
+        x0, y0, w0, h0 = self._resize_anchor
+        min_w, min_h = 420, 240
+        new_w = max(min_w, w0 + (event.x_root - x0))
+        new_h = max(min_h, h0 + (event.y_root - y0))
+        self.root.geometry(f"{new_w}x{new_h}")
 
     # ---------- Search ----------
     def _build_search_bar(self):
@@ -398,17 +479,17 @@ class NotesApp:
 
         row = ttk.Frame(self.search_frame)
         row.pack(side="top", fill="x", padx=6, pady=(6, 2))
-        ttk.Label(row, text="search:", background="#1e1e1e",
-                  foreground="#9a9a9a").pack(side="left", padx=(0, 6))
-        self.search_entry = tk.Entry(row, bg="#252526", fg="#e6e6e6",
-                                     insertbackground="#e6e6e6", relief="flat",
-                                     font=("Monospace", 11))
+        ttk.Label(row, text="search:", background=BG,
+                  foreground=FG_DIM, font=UI_FONT).pack(side="left", padx=(0, 6))
+        self.search_entry = tk.Entry(row, bg=EDITOR_BG, fg=FG,
+                                     insertbackground=FG_BRIGHT, relief="flat",
+                                     font=EDITOR_FONT)
         self.search_entry.pack(side="left", fill="x", expand=True)
         ttk.Button(row, text="×", width=3, command=self._close_search).pack(side="left", padx=(6, 0))
 
         self.search_results = tk.Listbox(
-            self.search_frame, height=6, bg="#252526", fg="#e6e6e6",
-            selectbackground="#264f78", relief="flat",
+            self.search_frame, height=6, bg=EDITOR_BG, fg=FG,
+            selectbackground=SEL_BG, relief="flat",
             font=("Monospace", 10), activestyle="none", borderwidth=0,
             highlightthickness=0,
         )
@@ -525,7 +606,7 @@ class NotesApp:
         start = f"{hit['line']}.{hit['col']}"
         end = f"{hit['line']}.{hit['col'] + hit['length']}"
         text.tag_add("search_hit", start, end)
-        text.tag_configure("search_hit", background="#5a4a1a", foreground="#ffffff")
+        text.tag_configure("search_hit", background=HIT_BG, foreground=HIT_FG)
         text.mark_set("insert", start)
         text.see(start)
 

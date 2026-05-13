@@ -75,7 +75,12 @@ class NotesApp:
         self.root.geometry("760x540")
         self.root.minsize(420, 240)
         self.root.attributes("-topmost", True)
-        self.root.overrideredirect(True)  # hide WM title bar
+        # Ask the WM for a borderless window instead of overrideredirect —
+        # the latter breaks keyboard focus under GNOME Wayland/XWayland.
+        try:
+            self.root.attributes("-type", "splash")
+        except tk.TclError:
+            pass
         self.root.configure(bg=BG)
 
         style = ttk.Style()

@@ -17,10 +17,15 @@ A lightweight, single-instance overlay notepad for Linux desktops. Press a globa
 | Shortcut | Action |
 |---|---|
 | `Alt+N` | New tab |
-| `Alt+D` | Close current tab |
+| `Alt+P` | Close current tab |
+| `Alt+F` | Open search bar (substring search across all tabs) |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Cycle tabs |
-| `Esc` | Hide overlay |
+| `Esc` | Close search bar if open, otherwise hide overlay |
 | Double-click tab | Rename |
+
+### Search
+
+`Alt+F` opens a search bar at the top of the window. Type to scan every tab's content; results show up as `<tab> · L<line> — <preview>`. Use `Down` / `Enter` to move from the entry into the results, click any result (or press `Enter`) to jump to that tab with the match highlighted. `Esc` closes the bar and clears highlights. Matches are capped at 50 results.
 
 ## Requirements
 

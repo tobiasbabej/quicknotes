@@ -70,16 +70,17 @@ class NotesApp:
 
         self._setup_closeable_notebook(style)
 
-        container = ttk.Frame(self.root)
-        container.pack(fill="both", expand=True)
+        self.container = ttk.Frame(self.root)
+        self.container.pack(fill="both", expand=True)
+        self._build_search_bar()
 
-        self.nb = ttk.Notebook(container, style="Closeable.TNotebook")
+        self.nb = ttk.Notebook(self.container, style="Closeable.TNotebook")
         self.nb.pack(side="left", fill="both", expand=True, padx=(6, 0), pady=6)
         self._pressed_close_idx = None
         self.nb.bind("<ButtonPress-1>", self._on_tab_press, add=True)
         self.nb.bind("<ButtonRelease-1>", self._on_tab_release, add=True)
 
-        side = ttk.Frame(container)
+        side = ttk.Frame(self.container)
         side.pack(side="right", fill="y", padx=6, pady=6)
         ttk.Button(side, text="+ new", width=10, command=self.new_tab).pack(pady=2)
         ttk.Button(side, text="rename", width=10, command=self.rename_current_tab).pack(pady=2)
@@ -95,9 +96,10 @@ class NotesApp:
         if not self.tabs:
             self.new_tab(name="Note 1")
 
-        self.root.bind_all("<Escape>", lambda e: self.hide())
+        self.root.bind_all("<Escape>", self._on_escape)
         self.root.bind_all("<Alt-n>", lambda e: (self.new_tab(), "break")[1])
-        self.root.bind_all("<Alt-d>", lambda e: (self.close_current_tab(), "break")[1])
+        self.root.bind_all("<Alt-p>", lambda e: (self.close_current_tab(), "break")[1])
+        self.root.bind_all("<Alt-f>", lambda e: (self._open_search(), "break")[1])
         self.root.bind_all("<Control-Tab>", lambda e: self._cycle_tab(1))
         self.root.bind_all("<Control-Shift-ISO_Left_Tab>", lambda e: self._cycle_tab(-1))
         self.nb.bind("<Double-Button-1>", self.on_tab_double_click)
@@ -386,6 +388,153 @@ class NotesApp:
         idx = self._current_index()
         if idx is not None and 0 <= idx < len(self.tabs):
             self.tabs[idx]["text"].focus_set()
+
+    # ---------- Search ----------
+    def _build_search_bar(self):
+        self.search_frame = ttk.Frame(self.root)
+        self.search_visible = False
+        self._search_hits = []
+        self._search_after_id = None
+
+        row = ttk.Frame(self.search_frame)
+        row.pack(side="top", fill="x", padx=6, pady=(6, 2))
+        ttk.Label(row, text="search:", background="#1e1e1e",
+                  foreground="#9a9a9a").pack(side="left", padx=(0, 6))
+        self.search_entry = tk.Entry(row, bg="#252526", fg="#e6e6e6",
+                                     insertbackground="#e6e6e6", relief="flat",
+                                     font=("Monospace", 11))
+        self.search_entry.pack(side="left", fill="x", expand=True)
+        ttk.Button(row, text="×", width=3, command=self._close_search).pack(side="left", padx=(6, 0))
+
+        self.search_results = tk.Listbox(
+            self.search_frame, height=6, bg="#252526", fg="#e6e6e6",
+            selectbackground="#264f78", relief="flat",
+            font=("Monospace", 10), activestyle="none", borderwidth=0,
+            highlightthickness=0,
+        )
+        self.search_results.pack(side="top", fill="x", padx=6, pady=(0, 6))
+
+        self.search_entry.bind("<KeyRelease>", self._on_search_type)
+        self.search_entry.bind("<Return>", lambda e: self._focus_results())
+        self.search_entry.bind("<Down>", lambda e: self._focus_results())
+        self.search_entry.bind("<Escape>", lambda e: (self._close_search(), "break")[1])
+        self.search_results.bind("<<ListboxSelect>>", self._on_result_select)
+        self.search_results.bind("<Return>", lambda e: self._on_result_select())
+        self.search_results.bind("<Double-Button-1>", self._on_result_select)
+        self.search_results.bind("<Escape>", lambda e: (self._close_search(), "break")[1])
+
+    def _open_search(self):
+        if not self.search_visible:
+            self.search_frame.pack(before=self.container, fill="x")
+            self.search_visible = True
+        self.search_entry.focus_set()
+        self.search_entry.select_range(0, "end")
+
+    def _close_search(self):
+        if not self.search_visible:
+            return
+        self.search_frame.pack_forget()
+        self.search_visible = False
+        for tab in self.tabs:
+            try:
+                tab["text"].tag_remove("search_hit", "1.0", "end")
+            except tk.TclError:
+                pass
+        self._focus_current_text()
+
+    def _on_search_type(self, event):
+        if event.keysym in ("Up", "Down", "Return", "Escape", "Tab"):
+            return
+        if self._search_after_id:
+            try:
+                self.root.after_cancel(self._search_after_id)
+            except tk.TclError:
+                pass
+        q = self.search_entry.get()
+        self._search_after_id = self.root.after(120, lambda: self._do_search(q))
+
+    def _do_search(self, query):
+        self._search_hits = []
+        if not query:
+            self._render_results()
+            return
+        q_lower = query.lower()
+        cap = 50
+        for tab_idx, tab in enumerate(self.tabs):
+            content = tab["text"].get("1.0", "end-1c")
+            for line_no, line_text in enumerate(content.split("\n"), start=1):
+                line_lower = line_text.lower()
+                start = 0
+                while True:
+                    pos = line_lower.find(q_lower, start)
+                    if pos < 0:
+                        break
+                    preview = line_text
+                    if len(preview) > 60:
+                        s = max(0, pos - 20)
+                        preview = ("…" if s > 0 else "") + line_text[s:s + 60] + \
+                                  ("…" if s + 60 < len(line_text) else "")
+                    self._search_hits.append({
+                        "tab_idx": tab_idx,
+                        "line": line_no,
+                        "col": pos,
+                        "length": len(query),
+                        "label": f"{tab['name']} · L{line_no} — {preview.strip()}",
+                    })
+                    if len(self._search_hits) >= cap:
+                        break
+                    start = pos + max(1, len(query))
+                if len(self._search_hits) >= cap:
+                    break
+            if len(self._search_hits) >= cap:
+                break
+        self._render_results()
+
+    def _render_results(self):
+        self.search_results.delete(0, "end")
+        for hit in self._search_hits:
+            self.search_results.insert("end", hit["label"])
+        if self._search_hits:
+            self.search_results.selection_clear(0, "end")
+
+    def _focus_results(self):
+        if self.search_results.size() == 0:
+            return "break"
+        self.search_results.focus_set()
+        self.search_results.selection_clear(0, "end")
+        self.search_results.selection_set(0)
+        self.search_results.activate(0)
+        self._on_result_select()
+        return "break"
+
+    def _on_result_select(self, event=None):
+        sel = self.search_results.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        if not (0 <= idx < len(self._search_hits)):
+            return
+        hit = self._search_hits[idx]
+        self.nb.select(hit["tab_idx"])
+        text = self.tabs[hit["tab_idx"]]["text"]
+        for tab in self.tabs:
+            try:
+                tab["text"].tag_remove("search_hit", "1.0", "end")
+            except tk.TclError:
+                pass
+        start = f"{hit['line']}.{hit['col']}"
+        end = f"{hit['line']}.{hit['col'] + hit['length']}"
+        text.tag_add("search_hit", start, end)
+        text.tag_configure("search_hit", background="#5a4a1a", foreground="#ffffff")
+        text.mark_set("insert", start)
+        text.see(start)
+
+    def _on_escape(self, event=None):
+        if self.search_visible:
+            self._close_search()
+            return "break"
+        self.hide()
+        return "break"
 
     # ---------- Visibility ----------
     def show(self):
